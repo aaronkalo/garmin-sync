@@ -9,15 +9,13 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 def get_garmin_data():
-    # 1. Garmin Login
     api = Garmin(os.getenv("GARMIN_EMAIL"), os.getenv("GARMIN_PASSWORD"))
     api.login()
     
-    # Yesterday's Date
+    # Logic to fetch data for "Yesterday"
     target_date = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-    print(f"Fetching Garmin data for {target_date}...")
+    print(f"Fetching data for {target_date}...")
 
-    # 2. Fetch Metrics (Safety First)
     try: stats = api.get_stats(target_date)
     except: stats = {}
     try: sleep = api.get_sleep_data(target_date)
@@ -25,7 +23,6 @@ def get_garmin_data():
     try: hrv = api.get_hrv_data(target_date)
     except: hrv = {}
     
-    # Body Battery Logic
     bb_max = "N/A"
     try:
         bb_data = api.get_body_battery(target_date)
@@ -34,7 +31,6 @@ def get_garmin_data():
             if values: bb_max = max(values)
     except: pass
 
-    # Activity Logic (Swim, Gym, Walk)
     recent_workouts = []
     try:
         activities = api.get_activities(0, 10)
@@ -43,7 +39,6 @@ def get_garmin_data():
                 recent_workouts.append(f"{act['activityType']['typeKey']}({round(act['duration']/60)}m)")
     except: pass
 
-    # 3. Create Daily Entry
     return {
         "Date": target_date,
         "Sleep_Score": sleep.get('dailySleepDTO', {}).get('sleepScore', "N/A"),
@@ -62,7 +57,7 @@ def sync_to_drive(new_entry):
     )
     service = build('drive', 'v3', credentials=creds)
 
-    # 1. Download Existing File
+    # 1. Download Existing History
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
@@ -73,22 +68,22 @@ def sync_to_drive(new_entry):
         fh.seek(0)
         df_existing = pd.read_csv(fh)
     except Exception:
-        # If file is empty/invalid, start fresh
         df_existing = pd.DataFrame(columns=["Date", "Sleep_Score", "HRV_Avg", "Body_Battery_Max", "Stress_Avg", "Workouts"])
 
-    # 2. Append New Data
+    # 2. Append New Data (Keep Everything)
     df_new = pd.DataFrame([new_entry])
     df_combined = pd.concat([df_existing, df_new]).drop_duplicates(subset=['Date'], keep='last')
     
-    # Keep only the last 30 days to stay within Gemini's context window
-    df_combined = df_combined.tail(30)
+    # Sort by date so the newest is always at the bottom
+    df_combined['Date'] = pd.to_datetime(df_combined['Date'])
+    df_combined = df_combined.sort_values('Date')
     
     df_combined.to_csv("sync.csv", index=False)
 
-    # 3. Update File (Quota-Safe)
+    # 3. Update File
     media = MediaFileUpload("sync.csv", mimetype='text/csv', resumable=False)
     service.files().update(fileId=file_id, media_body=media).execute()
-    print("Drive Sync Complete!")
+    print(f"Sync Successful. Total records: {len(df_combined)}")
 
 if __name__ == "__main__":
     try:
