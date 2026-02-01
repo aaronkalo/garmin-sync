@@ -1,29 +1,31 @@
 import os
 import json
 import datetime
+import io
 import pandas as pd
 from garminconnect import Garmin
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 def get_garmin_data():
-    email = os.getenv("GARMIN_EMAIL")
-    password = os.getenv("GARMIN_PASSWORD")
-    api = Garmin(email, password)
+    # 1. Garmin Login
+    api = Garmin(os.getenv("GARMIN_EMAIL"), os.getenv("GARMIN_PASSWORD"))
     api.login()
-
+    
+    # Yesterday's Date
     target_date = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-    print(f"Fetching data for {target_date}...")
+    print(f"Fetching Garmin data for {target_date}...")
 
-    # Fetch stats with safety
+    # 2. Fetch Metrics (Safety First)
     try: stats = api.get_stats(target_date)
     except: stats = {}
     try: sleep = api.get_sleep_data(target_date)
     except: sleep = {}
     try: hrv = api.get_hrv_data(target_date)
     except: hrv = {}
-
+    
+    # Body Battery Logic
     bb_max = "N/A"
     try:
         bb_data = api.get_body_battery(target_date)
@@ -32,45 +34,65 @@ def get_garmin_data():
             if values: bb_max = max(values)
     except: pass
 
-    data_summary = {
+    # Activity Logic (Swim, Gym, Walk)
+    recent_workouts = []
+    try:
+        activities = api.get_activities(0, 10)
+        for act in activities:
+            if act['startTimeLocal'].startswith(target_date):
+                recent_workouts.append(f"{act['activityType']['typeKey']}({round(act['duration']/60)}m)")
+    except: pass
+
+    # 3. Create Daily Entry
+    return {
         "Date": target_date,
         "Sleep_Score": sleep.get('dailySleepDTO', {}).get('sleepScore', "N/A"),
         "HRV_Avg": hrv.get('hrvSummary', {}).get('lastNightAvg', "N/A"),
         "Body_Battery_Max": bb_max,
-        "Stress_Avg": stats.get('averageStressLevel', "N/A")
+        "Stress_Avg": stats.get('averageStressLevel', "N/A"),
+        "Workouts": ", ".join(recent_workouts) if recent_workouts else "None"
     }
-    
-    filename = "garmin_daily_summary.csv"
-    pd.DataFrame([data_summary]).to_csv(filename, index=False)
-    return filename
 
-def upload_to_drive(file_path):
-    folder_id = os.getenv("DRIVE_FOLDER_ID")
-    if not folder_id:
-        raise ValueError("DRIVE_FOLDER_ID is missing from GitHub Secrets!")
-
+def sync_to_drive(new_entry):
+    file_id = os.getenv("DRIVE_FILE_ID")
     service_account_info = json.loads(os.getenv("GDRIVE_JSON_KEY"))
+    
     creds = service_account.Credentials.from_service_account_info(
-        service_account_info, 
-        scopes=['https://www.googleapis.com/auth/drive']
+        service_account_info, scopes=['https://www.googleapis.com/auth/drive']
     )
     service = build('drive', 'v3', credentials=creds)
 
-    file_metadata = {
-        'name': 'Garmin_Data_Live.csv',
-        'parents': [folder_id]
-    }
+    # 1. Download Existing File
+    request = service.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    try:
+        while done is False:
+            status, done = downloader.next_chunk()
+        fh.seek(0)
+        df_existing = pd.read_csv(fh)
+    except Exception:
+        # If file is empty/invalid, start fresh
+        df_existing = pd.DataFrame(columns=["Date", "Sleep_Score", "HRV_Avg", "Body_Battery_Max", "Stress_Avg", "Workouts"])
+
+    # 2. Append New Data
+    df_new = pd.DataFrame([new_entry])
+    df_combined = pd.concat([df_existing, df_new]).drop_duplicates(subset=['Date'], keep='last')
     
-    # Using simple upload instead of resumable to avoid 404 session errors
-    media = MediaFileUpload(file_path, mimetype='text/csv', resumable=False)
+    # Keep only the last 30 days to stay within Gemini's context window
+    df_combined = df_combined.tail(30)
     
-    print(f"Uploading to folder: {folder_id}...")
-    file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-    print(f"Success! File ID: {file.get('id')}")
+    df_combined.to_csv("sync.csv", index=False)
+
+    # 3. Update File (Quota-Safe)
+    media = MediaFileUpload("sync.csv", mimetype='text/csv', resumable=False)
+    service.files().update(fileId=file_id, media_body=media).execute()
+    print("Drive Sync Complete!")
 
 if __name__ == "__main__":
     try:
-        csv_file = get_garmin_data()
-        upload_to_drive(csv_file)
+        entry = get_garmin_data()
+        sync_to_drive(entry)
     except Exception as e:
-        print(f"Critical Error: {e}")
+        print(f"CRITICAL ERROR: {e}")
