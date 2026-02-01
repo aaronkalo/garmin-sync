@@ -14,38 +14,57 @@ def get_garmin_data():
     api = Garmin(email, password)
     api.login()
 
-    # Define date (pulling yesterday's complete data)
+    # Define date (Yesterday)
     target_date = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    print(f"Fetching data for {target_date}...")
 
-    # 2. Fetch Health Metrics
-    stats = api.get_stats(target_date)
-    sleep = api.get_sleep_data(target_date)
-    hrv = api.get_hrv_data(target_date)
-    # Body Battery comes as a list of values throughout the day
-    bb_data = api.get_body_battery(target_date)
-    bb_max = max([val['bodyBatteryValue'] for val in bb_data]) if bb_data else "N/A"
+    # 2. Fetch Health Metrics with Safety Defaults
+    try:
+        stats = api.get_stats(target_date)
+    except: stats = {}
 
-    # 3. Fetch Activities (Last 5)
-    activities = api.get_activities(0, 5)
+    try:
+        sleep = api.get_sleep_data(target_date)
+    except: sleep = {}
+
+    try:
+        hrv = api.get_hrv_data(target_date)
+    except: hrv = {}
+
+    # --- FIXED BODY BATTERY LOGIC ---
+    bb_max = "N/A"
+    try:
+        bb_data = api.get_body_battery(target_date)
+        if bb_data and isinstance(bb_data, list):
+            # The key is often 'value' in recent wrapper updates
+            values = [val.get('value') or val.get('bodyBatteryValue') for val in bb_data if (val.get('value') or val.get('bodyBatteryValue'))]
+            if values:
+                bb_max = max(values)
+    except Exception as e:
+        print(f"Note: Could not process Body Battery: {e}")
+
+    # 3. Fetch Activities
     recent_workouts = []
-    for act in activities:
-        # Check if activity happened on target date
-        if act['startTimeLocal'].startswith(target_date):
-            recent_workouts.append({
-                "Type": act['activityType']['typeKey'],
-                "Name": act['activityName'],
-                "Duration_Min": round(act['duration'] / 60, 1),
-                "Calories": act['calories']
-            })
+    try:
+        activities = api.get_activities(0, 10)
+        for act in activities:
+            if act['startTimeLocal'].startswith(target_date):
+                recent_workouts.append({
+                    "Type": act['activityType']['typeKey'],
+                    "Name": act['activityName'],
+                    "Duration_Min": round(act['duration'] / 60, 1),
+                    "Calories": act['calories']
+                })
+    except: pass
 
-    # 4. Consolidate into a flat dictionary for CSV
+    # 4. Consolidate
     data_summary = {
         "Date": target_date,
         "Sleep_Score": sleep.get('dailySleepDTO', {}).get('sleepScore', "N/A"),
         "HRV_Avg": hrv.get('hrvSummary', {}).get('lastNightAvg', "N/A"),
         "Body_Battery_Max": bb_max,
         "Stress_Avg": stats.get('averageStressLevel', "N/A"),
-        "Workouts": json.dumps(recent_workouts) # JSON string to keep CSV clean
+        "Workouts": json.dumps(recent_workouts)
     }
     
     df = pd.DataFrame([data_summary])
@@ -54,7 +73,7 @@ def get_garmin_data():
     return filename
 
 def upload_to_drive(file_path):
-    # 1. Drive Authentication via Service Account Secret
+    # Setup Drive
     service_account_info = json.loads(os.getenv("GDRIVE_JSON_KEY"))
     folder_id = os.getenv("DRIVE_FOLDER_ID")
     
@@ -64,21 +83,20 @@ def upload_to_drive(file_path):
     )
     service = build('drive', 'v3', credentials=creds)
 
-    # 2. Upload/Update Logic
+    # File Metadata
     file_metadata = {
-        'name': 'Garmin_Data_Live.csv', # Keeping same name so Gemini doesn't get confused
+        'name': 'Garmin_Data_Live.csv',
         'parents': [folder_id]
     }
-    media = MediaFileUpload(file_path, mimetype='text/csv', resumable=True)
+    media = MediaFileUpload(file_path, mimetype='text/csv')
 
-    # Note: This creates a NEW file daily. 
-    # To keep it "clean," we just upload it with the same name.
+    # Upload
     file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-    print(f"File uploaded successfully. ID: {file.get('id')}")
+    print(f"Success! Uploaded to Drive. File ID: {file.get('id')}")
 
 if __name__ == "__main__":
     try:
         csv_file = get_garmin_data()
         upload_to_drive(csv_file)
     except Exception as e:
-        print(f"Error during sync: {e}")
+        print(f"Critical Error: {e}")
