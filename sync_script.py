@@ -25,31 +25,40 @@ def flatten_json(y):
 def get_garmin_data():
     api = Garmin(os.getenv("GARMIN_EMAIL"), os.getenv("GARMIN_PASSWORD"))
     api.login()
-    target_date = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-    print(f"Fetching data for {target_date}...")
-
-    # Fetch Data Buckets
-    try: daily_summary = api.get_stats(target_date)
-    except: daily_summary = {}
-    try: sleep_data = api.get_sleep_data(target_date)
-    except: sleep_data = {}
-    try: hrv_data = api.get_hrv_data(target_date)
-    except: hrv_data = {}
     
-    # Flatten Data
-    row = {"Date": target_date}
-    row.update(flatten_json(daily_summary))
-    row.update({f"sleep_{k}": v for k, v in flatten_json(sleep_data).items()})
-    row.update({f"hrv_{k}": v for k, v in flatten_json(hrv_data).items()})
+    # Fetch Yesterday AND Today to ensure history is finalized
+    today = datetime.date.today()
+    days_to_fetch = [
+        (today - datetime.timedelta(days=1)).isoformat(), # Yesterday (Finalizing)
+        today.isoformat()                                 # Today (Fresh Sleep)
+    ]
+    
+    all_rows = []
+    print(f"Syncing data for: {days_to_fetch}...")
 
-    try:
-        activities = api.get_activities(0, 20)
-        daily_acts = [a for a in activities if a['startTimeLocal'].startswith(target_date)]
-        row["All_Activities_Raw"] = json.dumps(daily_acts)
-    except:
-        row["All_Activities_Raw"] = "[]"
+    for target_date in days_to_fetch:
+        try: daily_summary = api.get_stats(target_date)
+        except: daily_summary = {}
+        try: sleep_data = api.get_sleep_data(target_date)
+        except: sleep_data = {}
+        try: hrv_data = api.get_hrv_data(target_date)
+        except: hrv_data = {}
+        
+        row = {"Date": target_date}
+        row.update(flatten_json(daily_summary))
+        row.update({f"sleep_{k}": v for k, v in flatten_json(sleep_data).items()})
+        row.update({f"hrv_{k}": v for k, v in flatten_json(hrv_data).items()})
 
-    return row
+        try:
+            activities = api.get_activities(0, 20)
+            daily_acts = [a for a in activities if a['startTimeLocal'].startswith(target_date)]
+            row["All_Activities_Raw"] = json.dumps(daily_acts)
+        except:
+            row["All_Activities_Raw"] = "[]"
+            
+        all_rows.append(row)
+
+    return all_rows
 
 def sync_to_drive(new_entry):
     file_id = os.getenv("DRIVE_FILE_ID")
