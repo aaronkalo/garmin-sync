@@ -60,7 +60,7 @@ def get_garmin_data():
 
     return all_rows
 
-def sync_to_drive(new_entry):
+def sync_to_drive(new_entries):
     file_id = os.getenv("DRIVE_FILE_ID")
     service_account_info = json.loads(os.getenv("GDRIVE_JSON_KEY"))
     
@@ -72,7 +72,7 @@ def sync_to_drive(new_entry):
     print("Downloading existing history...")
     df_existing = pd.DataFrame()
     
-    # --- SAFETY LOGIC START ---
+    # --- SAFETY LOGIC ---
     try:
         request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
@@ -82,35 +82,32 @@ def sync_to_drive(new_entry):
             status, done = downloader.next_chunk()
         fh.seek(0)
 
-        # Only try to read if we actually got bytes back
         if fh.getbuffer().nbytes > 0:
             try:
                 df_existing = pd.read_csv(fh)
                 print(f"Found {len(df_existing)} previous records.")
             except pd.errors.EmptyDataError:
                 print("File exists but is empty. Starting fresh.")
-                df_existing = pd.DataFrame()
         else:
             print("File is 0 bytes. Starting fresh.")
-            df_existing = pd.DataFrame()
-
     except HttpError as e:
         print(f"CRITICAL DOWNLOAD ERROR: {e}")
-        print("STOPPING SYNC TO PROTECT DATA.")
-        # If we can't read the file (e.g., it's a Google Sheet), we abort here.
         return 
-    # --- SAFETY LOGIC END ---
+    # ---------------------
 
-    # Append & Deduplicate
-    df_new = pd.DataFrame([new_entry])
+    # Convert new list to DataFrame
+    df_new = pd.DataFrame(new_entries)
+    
+    # Combine and Deduplicate (The "Self-Healing" Step)
+    # keep='last' ensures the newest fetch for a date overwrites the old one
     df_combined = pd.concat([df_existing, df_new], sort=False).drop_duplicates(subset=['Date'], keep='last')
     
-    # Sort
+    # Sort Chronologically
     if 'Date' in df_combined.columns:
         df_combined['Date'] = pd.to_datetime(df_combined['Date'])
         df_combined = df_combined.sort_values('Date')
     
-    print(f"Uploading new history ({len(df_combined)} rows)...")
+    print(f"Uploading updated history ({len(df_combined)} rows)...")
     df_combined.to_csv("sync.csv", index=False)
     
     media = MediaFileUpload("sync.csv", mimetype='text/csv', resumable=False)
@@ -119,7 +116,7 @@ def sync_to_drive(new_entry):
 
 if __name__ == "__main__":
     try:
-        entry = get_garmin_data()
-        sync_to_drive(entry)
+        entries = get_garmin_data()
+        sync_to_drive(entries)
     except Exception as e:
         print(f"CRITICAL ERROR: {e}")
